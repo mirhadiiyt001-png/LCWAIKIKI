@@ -48,8 +48,10 @@ already present) and a `railway.json` are included.
 > **State note:** the bot persists loaded numbers / proxies / results to
 > `bot_state.json` on the local disk. Railway's container filesystem is
 > ephemeral and resets on every redeploy. To keep state across redeploys,
-> attach a Railway **Volume** mounted at `/app` (or move `bot_state.json` onto
-> a mounted volume path).
+> attach a Railway **Volume** and point the bot at it — mount the volume at
+> `/data` and set `STATE_FILE=/data/bot_state.json` in the service variables.
+> (Do **not** mount the volume at `/app`: that would hide the app code and the
+> container won't start.)
 
 ## Usage
 
