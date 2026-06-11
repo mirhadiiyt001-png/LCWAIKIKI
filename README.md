@@ -68,12 +68,11 @@ Message the bot in Telegram:
 | `/status` | Live run statistics |
 | `/history` | Per-number outcomes recorded so far (alias `/results`) |
 | `/clear` | Clear loaded numbers, proxies and result history |
-| `/users` | (admins) List admins, approved members and pending requests |
 
 `/start` opens a **premium-emoji control panel**: inline buttons (Run, Resume,
-Stop, Status, Results, Clear, Add Numbers, Add Proxy, Refresh, plus Members for
-admins) with custom-emoji icons and coloured styles. The panel buttons mirror
-the commands, so you can drive the bot entirely by tapping.
+Stop, Status, Results, Clear, Add Numbers, Add Proxy, Refresh) with custom-emoji
+icons and coloured styles. The panel buttons mirror the commands, so you can
+drive the bot entirely by tapping.
 
 ## Result tracking & resuming
 
@@ -106,19 +105,13 @@ remaining tally. Each number ends on ✅ *OTP sent* or ❌ with the failure
 reason, and the card finishes with a run summary. The card is styled to match
 the premium-emoji panel and degrades gracefully like the rest of the UI.
 
-## Access control (request to join)
+## Access control (admin-only)
 
-The bot is private. **Admins** (`ADMIN_IDS`) are pre-approved owners. Anyone
-else who opens the bot sees a locked welcome with a **Request Access** button:
-
-1. The user taps *Request Access* — their request is sent to every admin with
-   **Approve** / **Decline** buttons.
-2. An admin taps *Approve* — the user is notified and can now use the bot.
-   *Decline* notifies the user and discards the request.
-
-Approved members can use all operational features; only admins can approve or
-decline requests and view the member list. The approved/pending lists are kept
-in memory and reset when the bot restarts.
+The bot is private and **admin-only**. Only the Telegram user IDs listed in
+`ADMIN_IDS` can use it — every command and every panel button is gated on that
+list. Anyone else who opens the bot sees a locked notice and is rejected; there
+is no request-to-join or approval flow. With `ADMIN_IDS` unset the bot fails
+closed and rejects everyone.
 
 ## Premium emoji
 
