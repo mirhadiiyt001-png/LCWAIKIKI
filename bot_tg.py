@@ -9,11 +9,11 @@ Two extras inspired by the 0x_HAWK_TG reference bot:
   * A premium-emoji styled control panel — inline buttons with custom-emoji
     icons and colour styles, rendered through the raw Telegram API with a
     graceful fallback (see core/premium.py).
-  * A request-to-join access gate — admins are pre-approved owners; everyone
-    else must request access from an admin before they can use the bot.
+  * Strict admin-only access — only the Telegram user IDs in ADMIN_IDS can
+    use the bot; everyone else is rejected.
 
 Commands:
-  /start       Show the control panel (or the access-request screen).
+  /start       Show the control panel (admins only).
   /addnumbers  Add phone numbers (inline text or attach/reply a .txt file).
   /addproxy    Add proxies (inline text, or attach a file with caption "proxy").
   /run         Start processing the loaded numbers.
@@ -22,7 +22,6 @@ Commands:
   /status      Show live run statistics.
   /history     Show per-number outcomes recorded so far (alias /results).
   /clear       Clear loaded numbers, proxies and result history.
-  /users       (admins) List admins, approved members and pending requests.
 
 Config via environment variables:
   BOT_TOKEN            Telegram bot token (required).
@@ -200,11 +199,8 @@ class BotState:
 
 state = BotState()
 
-# Access control. Admins are owners and pre-approved; everyone else must be
-# approved by an admin before they can use the bot. Kept in memory (resets on
-# restart), matching the reference design.
-approved_users: set[int] = set()
-pending_users: dict[int, dict] = {}  # user_id -> {"name", "username"}
+# Access control. Strict admin-only: only the user IDs listed in ADMIN_IDS
+# may use the bot. There is no request-to-join / approval flow.
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -219,16 +215,12 @@ def is_admin_id(uid) -> bool:
 
 
 def has_access(uid) -> bool:
-    if not ADMIN_IDS:
-        # Fail closed: with no admins configured nobody is allowed.
-        return False
-    return bool(uid) and (uid in ADMIN_IDS or uid in approved_users)
+    # Admin-only. Fails closed when ADMIN_IDS is empty.
+    return is_admin_id(uid)
 
 
 async def deny(update: Update):
-    await update.message.reply_text(
-        "🔒 This bot is private. Send /start to request access."
-    )
+    await update.message.reply_text("🔒 This bot is private. Access denied.")
 
 
 def esc(s) -> str:
@@ -243,12 +235,8 @@ def locked_welcome_text() -> str:
         f'{ce("🛍️")} <b>LC WAIKIKI · RU</b> {ce("🛍️")}\n'
         f"{SEP}\n\n"
         f'{ce("🔒")} <i>This bot is private.</i>\n\n'
-        f"Request access below and an admin will review it."
+        f"You are not authorised to use it."
     )
-
-
-def request_access_rows() -> list[list[dict]]:
-    return [[with_icon({"text": "Request Access", "callback_data": "req:access"}, "🔓")]]
 
 
 def panel_text() -> str:
@@ -283,8 +271,6 @@ def control_rows(uid) -> list[list[dict]]:
             with_icon({"text": "Add Proxy", "callback_data": "panel:addproxy"}, "🌐"),
         ],
     ]
-    if is_admin_id(uid):
-        rows.append([with_icon({"text": "Members", "callback_data": "panel:users"}, "👥")])
     rows.append([with_icon({"text": "Refresh", "callback_data": "panel:refresh"}, "🔄")])
     return rows
 
@@ -376,28 +362,6 @@ def history_text_styled() -> str:
         f'╭─ {ce("🕒")} <b>RECENT</b>\n'
         f"{recent_str}"
         f"{more}"
-    )
-
-
-def members_text() -> str:
-    approved = [u for u in approved_users if u not in ADMIN_IDS]
-    admins_str = ", ".join(f"<code>{u}</code>" for u in ADMIN_IDS) or "—"
-    approved_str = ", ".join(f"<code>{u}</code>" for u in approved) or "—"
-    if pending_users:
-        pending_str = "\n".join(
-            f'╰ <code>{uid}</code> — {esc(info.get("name") or "")}'
-            for uid, info in pending_users.items()
-        )
-    else:
-        pending_str = "╰ —"
-    return (
-        f'{ce("👥")} <b>MEMBERS</b>\n{SEP}\n\n'
-        f'╭─ {ce("🛡️")} <b>ADMINS</b> ({len(ADMIN_IDS)})\n'
-        f"╰ {admins_str}\n\n"
-        f'╭─ {ce("✅")} <b>APPROVED</b> ({len(approved)})\n'
-        f"╰ {approved_str}\n\n"
-        f'╭─ {ce("⏳")} <b>PENDING</b> ({len(pending_users)})\n'
-        f"{pending_str}"
     )
 
 
@@ -793,9 +757,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if has_access(uid):
         await premium.raw_send(BOT_TOKEN, chat_id, panel_text(), control_rows(uid))
     else:
-        await premium.raw_send(
-            BOT_TOKEN, chat_id, locked_welcome_text(), request_access_rows()
-        )
+        await premium.raw_send(BOT_TOKEN, chat_id, locked_welcome_text())
 
 
 async def cmd_addnumbers(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -909,12 +871,6 @@ async def cmd_history(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await premium.raw_send(BOT_TOKEN, update.effective_chat.id, history_text_styled())
 
 
-async def cmd_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin_id(_uid(update)):
-        return await deny(update)
-    await premium.raw_send(BOT_TOKEN, update.effective_chat.id, members_text())
-
-
 async def on_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Bare file upload (no command): route by caption."""
     if not has_access(_uid(update)):
@@ -924,32 +880,6 @@ async def on_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await cmd_addproxy(update, context)
     else:
         await cmd_addnumbers(update, context)
-
-
-# ─────────────────────────────────────────────────────────────────
-#  Access-request notification
-# ─────────────────────────────────────────────────────────────────
-async def notify_admins_access_request(user):
-    name = user.full_name or user.username or str(user.id)
-    text = (
-        f'{ce("🔔")} <b>ACCESS REQUEST</b>\n{SEP}\n\n'
-        f'╭─ {ce("👤")} <b>USER</b>\n'
-        f"├ Name      →  <b>{esc(name)}</b>\n"
-        f"├ Username  →  @{esc(user.username) if user.username else '—'}\n"
-        f"╰ ID        →  <code>{user.id}</code>\n\n"
-        f'{ce("❓")} Approve access for this user?'
-    )
-    rows = [
-        [
-            with_icon({"text": "Approve", "callback_data": f"approve:{user.id}"}, "✅"),
-            with_icon({"text": "Decline", "callback_data": f"decline:{user.id}"}, "❌"),
-        ]
-    ]
-    for admin_id in ADMIN_IDS:
-        try:
-            await premium.raw_send(BOT_TOKEN, admin_id, text, rows)
-        except Exception as e:
-            logger.warning("notify admin %s failed: %s", admin_id, e)
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -966,81 +896,10 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = msg.chat.id if msg else uid
     msg_id = msg.message_id if msg else None
 
-    # ── Access request ──
-    if data == "req:access":
-        if has_access(uid):
-            return await query.answer("You already have access. Send /start.")
-        if uid in pending_users:
-            return await query.answer("Your request is already pending.", show_alert=True)
-        pending_users[uid] = {"name": user.full_name, "username": user.username}
-        await notify_admins_access_request(user)
-        await query.answer("✅ Request sent to the admin.", show_alert=True)
-        if msg_id is not None:
-            await premium.raw_edit(
-                BOT_TOKEN,
-                chat_id,
-                msg_id,
-                f'{ce("⏳")} <b>Request sent.</b>\n\n'
-                f"The admin has been notified. You will be messaged once approved.",
-            )
-        return
-
-    # ── Admin: approve / decline ──
-    if data.startswith("approve:") or data.startswith("decline:"):
-        if not is_admin_id(uid):
-            return await query.answer("Admins only.", show_alert=True)
-        try:
-            target = int(data.split(":", 1)[1])
-        except ValueError:
-            return await query.answer("Bad request.", show_alert=True)
-        info = pending_users.pop(target, {})
-        name = info.get("name") or str(target)
-
-        if data.startswith("approve:"):
-            approved_users.add(target)
-            await query.answer(f"Approved {name}")
-            if msg_id is not None:
-                await premium.raw_edit(
-                    BOT_TOKEN,
-                    chat_id,
-                    msg_id,
-                    f'{ce("✅")} <b>Approved</b> — {esc(name)} (<code>{target}</code>)',
-                )
-            try:
-                await premium.raw_send(
-                    BOT_TOKEN,
-                    target,
-                    f'{ce("✅")} <b>Access granted!</b>\n\n'
-                    f"Send /start to open the control panel.",
-                )
-            except Exception:
-                pass
-        else:
-            # Honour an explicit decline even if another admin already
-            # approved this user — revoke any access they may hold.
-            approved_users.discard(target)
-            await query.answer(f"Declined {name}")
-            if msg_id is not None:
-                await premium.raw_edit(
-                    BOT_TOKEN,
-                    chat_id,
-                    msg_id,
-                    f'{ce("❌")} <b>Declined</b> — {esc(name)} (<code>{target}</code>)',
-                )
-            try:
-                await premium.raw_send(
-                    BOT_TOKEN,
-                    target,
-                    f'{ce("🚫")} Your access request was declined.',
-                )
-            except Exception:
-                pass
-        return
-
     # ── Control panel ──
     if data.startswith("panel:"):
         if not has_access(uid):
-            return await query.answer("No access. Send /start to request.", show_alert=True)
+            return await query.answer("Access denied.", show_alert=True)
         action = data.split(":", 1)[1]
 
         if action == "run":
@@ -1079,11 +938,6 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "Send /addproxy then the list, or attach a file captioned 'proxy'.",
                 show_alert=True,
             )
-        elif action == "users":
-            if not is_admin_id(uid):
-                return await query.answer("Admins only.", show_alert=True)
-            await query.answer()
-            await premium.raw_send(BOT_TOKEN, chat_id, members_text())
         elif action == "refresh":
             await query.answer("Refreshed")
             if msg_id is not None:
@@ -1108,7 +962,6 @@ BOT_COMMANDS = [
     BotCommand("addnumbers", "Add phone numbers"),
     BotCommand("addproxy", "Add proxies"),
     BotCommand("clear", "Clear numbers & proxies"),
-    BotCommand("users", "Members (admins)"),
     BotCommand("help", "Show help / panel"),
 ]
 
@@ -1131,9 +984,6 @@ def main():
     if not ADMIN_IDS:
         logger.warning("ADMIN_IDS is empty — the bot will reject everyone until it is set.")
 
-    # Owners are always approved.
-    approved_users.update(ADMIN_IDS)
-
     state.load()
 
     app = Application.builder().token(BOT_TOKEN).post_init(_post_init).build()
@@ -1148,7 +998,6 @@ def main():
     app.add_handler(CommandHandler("history", cmd_history))
     app.add_handler(CommandHandler("results", cmd_history))
     app.add_handler(CommandHandler("clear", cmd_clear))
-    app.add_handler(CommandHandler("users", cmd_users))
     app.add_handler(CallbackQueryHandler(on_callback))
     app.add_handler(MessageHandler(filters.Document.ALL, on_document))
 
