@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.tmp
+
+# Local/runtime files that must never ship in the image
+.env
+bot_state.json
+.git
+.gitignore

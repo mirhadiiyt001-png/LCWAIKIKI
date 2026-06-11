@@ -1,0 +1,3 @@
+# Runtime state persisted by the bot (loaded numbers/proxies)
+bot_state.json
+*.tmp

@@ -1,0 +1,6 @@
+# Pinned for reproducible container builds. The playwright version MUST match
+# the Playwright base image tag in the Dockerfile.
+playwright==1.60.0
+faker==40.23.0
+python-telegram-bot[job-queue]==22.7
+httpx==0.28.1
