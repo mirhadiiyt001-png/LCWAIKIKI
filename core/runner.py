@@ -242,6 +242,10 @@ class RegistrationRunner:
             f'{ce("🔄")} Loop      <b>{"ON" if self.loop_forever else "OFF"}</b>'
         )
 
+        # Numbers that failed due to proxy (not site error) — these will be retried.
+        proxy_failed_numbers = []
+        MAX_PROXY_RETRY_ROUNDS = 3  # max times to retry proxy-failed numbers
+
         async def on_result(phone, result):
             self.stats["total_submissions"] += 1
             self.stats["processed"] += 1
@@ -258,6 +262,14 @@ class RegistrationRunner:
                 emit(
                     f'{ce("⛔️")} <b>+7{phone}</b> <i>· site error</i>'
                     + (f'\n{ce("⚠️")} <i>{_esc(detail)}</i>' if detail else "")
+                )
+            elif status == "proxy_fail":
+                # Don't count as permanent failure — will be retried
+                proxy_failed_numbers.append(phone)
+                detail = result.get("detail", "")
+                self.stats["last_error"] = detail
+                emit(
+                    f'{ce("🔄")} <b>+7{phone}</b> <i>· proxy failed (will retry)</i>'
                 )
             else:
                 self.stats["failed"] += 1
@@ -280,7 +292,8 @@ class RegistrationRunner:
                     pass
 
             # Persist this per-number outcome (success/failed + timestamp).
-            if self.result_sink:
+            # Don't persist proxy_fail — it will be retried.
+            if self.result_sink and status != "proxy_fail":
                 try:
                     self.result_sink(phone, status, result.get("detail", ""))
                 except Exception:
@@ -294,11 +307,8 @@ class RegistrationRunner:
                     round_num += 1
                     self.stats["round"] = round_num
                     self.stats["processed"] = 0
-                    # The round indicator lives in the live card header and is
-                    # edited in place each round (Round 1 -> Round 2 -> ...), so
-                    # don't push a fresh stream message in bot mode. Fall back to
-                    # a stream line only when there is no structured-event
-                    # consumer (non-bot usage).
+                    proxy_failed_numbers.clear()
+
                     if on_step is not None:
                         try:
                             on_step({"kind": "round", "round": round_num})
@@ -363,6 +373,66 @@ class RegistrationRunner:
                         if not is_last and not self._stop_event.is_set():
                             await asyncio.sleep(0.5)
 
+                    # ── Retry proxy-failed numbers ──
+                    if not stop_run and not self._stop_event.is_set() and proxy_failed_numbers:
+                        for retry_round in range(1, MAX_PROXY_RETRY_ROUNDS + 1):
+                            if self._stop_event.is_set() or not proxy_failed_numbers:
+                                break
+                            retry_nums = list(proxy_failed_numbers)
+                            proxy_failed_numbers.clear()
+
+                            emit(
+                                f'{ce("🔄")} <b>PROXY RETRY {retry_round}/{MAX_PROXY_RETRY_ROUNDS}</b> · '
+                                f'{len(retry_nums)} numbers to retry'
+                            )
+                            await asyncio.sleep(2)
+
+                            retry_groups = [
+                                retry_nums[i:i + self.numbers_per_session]
+                                for i in range(0, len(retry_nums), self.numbers_per_session)
+                            ]
+                            for rg_start in range(0, len(retry_groups), c):
+                                if self._stop_event.is_set():
+                                    break
+                                rg_chunk = retry_groups[rg_start:rg_start + c]
+                                rtasks = []
+                                for rj, rgroup in enumerate(rg_chunk):
+                                    rsid = 900 + rg_start + rj + 1
+                                    proxy_raw = None
+                                    if self.proxies:
+                                        proxy_raw = self.proxies[(rg_start + rj + retry_round) % len(self.proxies)]
+                                    rtasks.append(automation.process_session(
+                                        rgroup, pw, rsid, proxy_raw,
+                                        on_result=on_result, log=log,
+                                        should_stop=self.should_stop,
+                                    ))
+                                rchunk_results = await asyncio.gather(*rtasks, return_exceptions=True)
+                                for r in rchunk_results:
+                                    if r is True:
+                                        stop_run = True
+                                        break
+                                if stop_run:
+                                    break
+
+                            if stop_run:
+                                self.stats["status"] = "STOPPED (site error)"
+                                emit(f'{ce("⛔️")} <b>HARD SITE ERROR</b> <i>· stopping run</i>')
+                                break
+
+                        # Any remaining proxy_failed after all retries → mark as failed
+                        if proxy_failed_numbers:
+                            for phone in proxy_failed_numbers:
+                                self.stats["failed"] += 1
+                                if self.result_sink:
+                                    try:
+                                        self.result_sink(phone, "failed", "Proxy failed after all retries")
+                                    except Exception:
+                                        pass
+                            emit(
+                                f'{ce("❌")} <b>{len(proxy_failed_numbers)} numbers</b> '
+                                f'<i>failed after {MAX_PROXY_RETRY_ROUNDS} proxy retries</i>'
+                            )
+
                     if stop_run or self._stop_event.is_set() or not self.loop_forever:
                         break
 
@@ -384,9 +454,6 @@ class RegistrationRunner:
             self.is_running = False
             if not stop_run:
                 self.stats["status"] = "STOPPED" if self._stop_event.is_set() else "DONE"
-            # In bot mode the live card is edited in place to its final RUN
-            # FINISHED summary, so don't also push a duplicate stream message.
-            # Only emit the textual summary when there is no live-card consumer.
             if on_step is None:
                 emit(
                     f'{ce("🏁")} <b>RUN FINISHED</b>\n'
@@ -396,3 +463,4 @@ class RegistrationRunner:
                     f'{ce("📨")} Total    <b>{self.stats["total_submissions"]}</b>\n'
                     f'{ce("⏱️")} Runtime  <b>{self.runtime_str()}</b>'
                 )
+

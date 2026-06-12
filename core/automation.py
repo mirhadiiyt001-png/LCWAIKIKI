@@ -26,8 +26,8 @@ TYPE_DELAY_MIN = 50        # ms between keystrokes (human-like min)
 TYPE_DELAY_MAX = 150       # ms between keystrokes (human-like max)
 PAGE_LOAD_WAIT = 1         # seconds after page load (give time to settle)
 POPUP_CONFIRM_WAIT = 4     # seconds to wait for popup/timer to appear
-PROXY_MAX_RETRIES = 3      # total connection attempts before giving up on a proxy
-PROXY_RETRY_DELAY = 5      # seconds to wait between proxy retry attempts
+PROXY_MAX_RETRIES = 5      # total connection attempts before giving up on a proxy
+PROXY_RETRY_DELAY = 2      # seconds to wait between proxy retry attempts
 
 # Single speed knob for the whole run. It scales every "human-like" thinking
 # pause (human_delay) and every keystroke gap (human_type). 1.0 = original
@@ -925,7 +925,7 @@ async def process_session(numbers_batch, pw_instance, session_id, proxy_str,
                         await _setup_blocking(context)
 
                         log("🌐", f"[S{session_id}] Opening {TARGET_URL} via {proto_name}...")
-                        await page.goto(TARGET_URL, wait_until="domcontentloaded", timeout=90000)
+                        await page.goto(TARGET_URL, wait_until="domcontentloaded", timeout=45000)
                         await page.wait_for_timeout(PAGE_LOAD_WAIT * 1000)
 
                         connected = True
@@ -946,7 +946,7 @@ async def process_session(numbers_batch, pw_instance, session_id, proxy_str,
             if not connected:
                 log("❌", f"[S{session_id}] Proxy failed after {PROXY_MAX_RETRIES} attempts!")
                 for phone in numbers_batch:
-                    await on_result(phone, {"status": "failed",
+                    await on_result(phone, {"status": "proxy_fail",
                                             "detail": f"Proxy connection failed after {PROXY_MAX_RETRIES} retries",
                                             "email": ""})
                 return False
@@ -998,7 +998,7 @@ async def process_session(numbers_batch, pw_instance, session_id, proxy_str,
 
             result = await fill_and_submit_number(page, phone_number, session_id, is_first, log)
 
-            if result["status"] == "failed" and not is_first:
+            if result["status"] == "failed":
                 log("🔄", f"[S{session_id}] Retrying with page reload...")
                 try:
                     await page.goto(TARGET_URL, wait_until="domcontentloaded", timeout=60000)
