@@ -989,7 +989,7 @@ async def cmd_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_auto(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin_id(_uid(update)):
+    if not has_access(_uid(update)):
         return await deny(update)
     chat_id = update.effective_chat.id
     if state.auto_run_enabled:
@@ -1249,8 +1249,8 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.answer()
             await premium.raw_send(BOT_TOKEN, chat_id, members_text(), members_rows())
         elif action == "auto":
-            if not is_admin_id(uid):
-                return await query.answer("Admins only.", show_alert=True)
+            if not has_access(uid):
+                return await query.answer("Access denied.", show_alert=True)
             await query.answer()
             if state.auto_run_enabled:
                 state.auto_run_enabled = False
