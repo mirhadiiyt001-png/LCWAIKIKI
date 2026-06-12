@@ -73,13 +73,15 @@ def _classify_log(icon, msg):
 
 
 class RegistrationRunner:
-    NUMBERS_PER_SESSION_DEFAULT = 5
+    NUMBERS_PER_SESSION_DEFAULT = 10
 
     def __init__(self, numbers, proxies, numbers_per_session=None, loop_forever=False,
-                 skip_succeeded=False, succeeded=None, result_sink=None):
+                 skip_succeeded=False, succeeded=None, result_sink=None,
+                 concurrent_sessions=1):
         self.numbers = list(numbers)
         self.proxies = list(proxies)
         self.numbers_per_session = numbers_per_session or self.NUMBERS_PER_SESSION_DEFAULT
+        self.concurrent_sessions = max(1, int(concurrent_sessions or 1))
         self.loop_forever = loop_forever
 
         # When skip_succeeded is on, numbers present in `succeeded` are not
@@ -305,52 +307,60 @@ class RegistrationRunner:
                     else:
                         emit(f'{ce("🔄")} <b>ROUND {round_num}</b>')
 
-                    for group_idx, group in enumerate(groups):
+                    # Process sessions in parallel chunks of `concurrent_sessions`.
+                    c = self.concurrent_sessions
+                    for chunk_start in range(0, len(groups), c):
                         if self._stop_event.is_set():
                             break
+                        chunk = groups[chunk_start:chunk_start + c]
 
-                        session_id = group_idx + 1
-                        self.stats["current_session"] = session_id
-                        self.stats["status"] = f"SESSION {session_id} RUNNING"
+                        tasks = []
+                        for j, group in enumerate(chunk):
+                            session_id = chunk_start + j + 1
+                            self.stats["current_session"] = session_id
+                            proxy_raw = None
+                            if self.proxies:
+                                proxy_raw = self.proxies[(chunk_start + j) % len(self.proxies)]
 
-                        proxy_raw = None
-                        if self.proxies:
-                            proxy_raw = self.proxies[group_idx % len(self.proxies)]
+                            if on_step is not None:
+                                try:
+                                    on_step({
+                                        "kind": "session",
+                                        "session": session_id,
+                                        "total_sessions": len(groups),
+                                        "proxy": proxy_raw or "",
+                                    })
+                                except Exception:
+                                    pass
+                            else:
+                                nums_label = ", ".join("+7" + n for n in group)
+                                emit(
+                                    f'{ce("🧩")} <b>SESSION {session_id}/{len(groups)}</b>\n'
+                                    f'{ce("📱")} <i>{_esc(nums_label)}</i>'
+                                    + (f'\n{ce("🌐")} <tg-spoiler><i>{_esc(proxy_raw)}</i></tg-spoiler>' if proxy_raw else "")
+                                )
+                            tasks.append(automation.process_session(
+                                group, pw, session_id, proxy_raw,
+                                on_result=on_result, log=log,
+                                should_stop=self.should_stop,
+                            ))
 
-                        # The session indicator + proxy live in the live card and
-                        # are edited in place (Session 1/45 -> 2/45 -> ...), so in
-                        # bot mode don't spawn a fresh stream message per session.
-                        if on_step is not None:
-                            try:
-                                on_step({
-                                    "kind": "session",
-                                    "session": session_id,
-                                    "total_sessions": len(groups),
-                                    "proxy": proxy_raw or "",
-                                })
-                            except Exception:
-                                pass
-                        else:
-                            nums_label = ", ".join("+7" + n for n in group)
-                            emit(
-                                f'{ce("🧩")} <b>SESSION {session_id}/{len(groups)}</b>\n'
-                                f'{ce("📱")} <i>{_esc(nums_label)}</i>'
-                                # Proxy hidden behind a tap-to-reveal spoiler.
-                                + (f'\n{ce("🌐")} <tg-spoiler><i>{_esc(proxy_raw)}</i></tg-spoiler>' if proxy_raw else "")
-                            )
+                        label = f"{chunk_start+1}" if len(chunk) == 1 else f"{chunk_start+1}–{chunk_start+len(chunk)}"
+                        self.stats["status"] = f"SESSIONS {label} RUNNING"
+                        chunk_results = await asyncio.gather(*tasks, return_exceptions=True)
 
-                        stop_run = await automation.process_session(
-                            group, pw, session_id, proxy_raw,
-                            on_result=on_result, log=log,
-                            should_stop=self.should_stop,
-                        )
+                        for r in chunk_results:
+                            if r is True:
+                                stop_run = True
+                                break
 
                         if stop_run:
                             self.stats["status"] = "STOPPED (site error)"
                             emit(f'{ce("⛔️")} <b>HARD SITE ERROR</b> <i>· stopping run</i>')
                             break
 
-                        if group_idx < len(groups) - 1 and not self._stop_event.is_set():
+                        is_last = (chunk_start + c >= len(groups))
+                        if not is_last and not self._stop_event.is_set():
                             await asyncio.sleep(1.0)
 
                     if stop_run or self._stop_event.is_set() or not self.loop_forever:

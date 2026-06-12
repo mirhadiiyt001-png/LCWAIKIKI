@@ -26,6 +26,8 @@ TYPE_DELAY_MIN = 50        # ms between keystrokes (human-like min)
 TYPE_DELAY_MAX = 150       # ms between keystrokes (human-like max)
 PAGE_LOAD_WAIT = 1         # seconds after page load (give time to settle)
 POPUP_CONFIRM_WAIT = 4     # seconds to wait for popup/timer to appear
+PROXY_MAX_RETRIES = 3      # total connection attempts before giving up on a proxy
+PROXY_RETRY_DELAY = 5      # seconds to wait between proxy retry attempts
 
 # Single speed knob for the whole run. It scales every "human-like" thinking
 # pause (human_delay) and every keystroke gap (human_type). 1.0 = original
@@ -893,51 +895,59 @@ async def process_session(numbers_batch, pw_instance, session_id, proxy_str,
         connected = False
 
         if proxy_variants:
-            for proxy_dict in proxy_variants:
+            for attempt in range(PROXY_MAX_RETRIES):
                 if _stop():
                     return False
-                proto_name = proxy_dict["server"].split("://")[0].upper()
-                log("🌐", f"[S{session_id}] Trying proxy ({proto_name}): {proxy_dict['server']}")
+                if attempt > 0:
+                    log("🔄", f"[S{session_id}] Proxy retry {attempt}/{PROXY_MAX_RETRIES - 1} in {PROXY_RETRY_DELAY}s…")
+                    await asyncio.sleep(PROXY_RETRY_DELAY)
+                for proxy_dict in proxy_variants:
+                    if _stop():
+                        return False
+                    proto_name = proxy_dict["server"].split("://")[0].upper()
+                    log("🌐", f"[S{session_id}] Trying proxy ({proto_name}): {proxy_dict['server']}")
 
-                if context:
-                    try:
-                        await context.close()
-                    except Exception:
-                        pass
-                    cleanup_profile_dir(profile_dir)
-                    profile_dir = create_temp_profile_dir()
-                    base_opts["user_data_dir"] = profile_dir
-
-                launch_opts = {**base_opts, "proxy": proxy_dict}
-                try:
-                    log("🚀", f"[S{session_id}] Launching browser ({proto_name})...")
-                    context = await pw_instance.chromium.launch_persistent_context(**launch_opts)
-                    await context.add_init_script(STEALTH_JS)
-                    page = context.pages[0] if context.pages else await context.new_page()
-                    await _setup_blocking(context)
-
-                    log("🌐", f"[S{session_id}] Opening {TARGET_URL} via {proto_name}...")
-                    await page.goto(TARGET_URL, wait_until="domcontentloaded", timeout=60000)
-                    await page.wait_for_timeout(PAGE_LOAD_WAIT * 1000)
-
-                    connected = True
-                    log("✅", f"[S{session_id}] Connected via {proto_name} proxy!")
-                    break
-                except Exception as e:
-                    log("⚠️", f"[S{session_id}] {proto_name} proxy failed: {str(e)[:80]}")
                     if context:
                         try:
                             await context.close()
-                            context = None
                         except Exception:
                             pass
-                    continue
+                        cleanup_profile_dir(profile_dir)
+                        profile_dir = create_temp_profile_dir()
+                        base_opts["user_data_dir"] = profile_dir
+
+                    launch_opts = {**base_opts, "proxy": proxy_dict}
+                    try:
+                        log("🚀", f"[S{session_id}] Launching browser ({proto_name})...")
+                        context = await pw_instance.chromium.launch_persistent_context(**launch_opts)
+                        await context.add_init_script(STEALTH_JS)
+                        page = context.pages[0] if context.pages else await context.new_page()
+                        await _setup_blocking(context)
+
+                        log("🌐", f"[S{session_id}] Opening {TARGET_URL} via {proto_name}...")
+                        await page.goto(TARGET_URL, wait_until="domcontentloaded", timeout=90000)
+                        await page.wait_for_timeout(PAGE_LOAD_WAIT * 1000)
+
+                        connected = True
+                        log("✅", f"[S{session_id}] Connected via {proto_name} proxy!")
+                        break
+                    except Exception as e:
+                        log("⚠️", f"[S{session_id}] {proto_name} proxy failed: {str(e)[:80]}")
+                        if context:
+                            try:
+                                await context.close()
+                                context = None
+                            except Exception:
+                                pass
+                        continue
+                if connected:
+                    break
 
             if not connected:
-                log("❌", f"[S{session_id}] ALL proxy protocols failed!")
+                log("❌", f"[S{session_id}] Proxy failed after {PROXY_MAX_RETRIES} attempts!")
                 for phone in numbers_batch:
                     await on_result(phone, {"status": "failed",
-                                            "detail": "All proxy protocols failed (http, socks5)",
+                                            "detail": f"Proxy connection failed after {PROXY_MAX_RETRIES} retries",
                                             "email": ""})
                 return False
         else:

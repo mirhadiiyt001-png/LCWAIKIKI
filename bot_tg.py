@@ -27,11 +27,13 @@ Config via environment variables:
   BOT_TOKEN            Telegram bot token (required).
   ADMIN_IDS            Comma-separated Telegram user IDs that own the bot (required).
   EMOJI_PACKS          Comma-separated sticker-pack names for premium emoji (optional).
-  NUMBERS_PER_SESSION  Numbers processed per browser session (default 5).
-  LOOP_FOREVER         "true" to keep re-running rounds until /stop (default false).
-  HEADLESS             "false" to run with a visible browser (default true).
-  BROWSER_CHANNEL      Optional Playwright channel, e.g. "chrome".
-  FIXED_PASSWORD       Password used on every registration (default Hadii@2024).
+  NUMBERS_PER_SESSION    Numbers processed per browser session (default 10).
+  CONCURRENT_SESSIONS    Parallel browser sessions per chunk (default 2).
+  AUTO_RUN_INTERVAL_MIN  Minutes between auto-run ticks when auto is ON (default 30).
+  LOOP_FOREVER           "true" to keep re-running rounds until /stop (default false).
+  HEADLESS               "false" to run with a visible browser (default true).
+  BROWSER_CHANNEL        Optional Playwright channel, e.g. "chrome".
+  FIXED_PASSWORD         Password used on every registration (default Hadii@2024).
 """
 
 import asyncio
@@ -87,7 +89,9 @@ def _parse_admin_ids():
 
 
 ADMIN_IDS = _parse_admin_ids()
-NUMBERS_PER_SESSION = int(os.environ.get("NUMBERS_PER_SESSION", "5") or "5")
+NUMBERS_PER_SESSION = int(os.environ.get("NUMBERS_PER_SESSION", "10") or "10")
+CONCURRENT_SESSIONS = int(os.environ.get("CONCURRENT_SESSIONS", "2") or "2")
+AUTO_RUN_INTERVAL_MIN = int(os.environ.get("AUTO_RUN_INTERVAL_MIN", "30") or "30")
 LOOP_FOREVER = os.environ.get("LOOP_FOREVER", "false").lower() == "true"
 
 # Where loaded numbers/proxies are persisted so they survive a restart.
@@ -121,10 +125,24 @@ class BotState:
         self.results = {}
         self.runner = None
         self.run_task = None
+        self.auto_run_enabled: bool = False
+        self.auto_chat_id: int | None = None
 
     def reset_collection(self):
         self.numbers = []
         self.proxies = []
+        self.results = {}
+        self.save()
+
+    def clear_numbers(self):
+        self.numbers = []
+        self.save()
+
+    def clear_proxies(self):
+        self.proxies = []
+        self.save()
+
+    def clear_results(self):
         self.results = {}
         self.save()
 
@@ -199,8 +217,10 @@ class BotState:
 
 state = BotState()
 
-# Access control. Strict admin-only: only the user IDs listed in ADMIN_IDS
-# may use the bot. There is no request-to-join / approval flow.
+# Access control. Admins (ADMIN_IDS) are pre-approved owners. Other users
+# may request access; an admin approves or declines each request.
+approved_users: set[int] = set()
+pending_users: dict[int, dict] = {}  # user_id -> {"name", "username"}
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -215,12 +235,15 @@ def is_admin_id(uid) -> bool:
 
 
 def has_access(uid) -> bool:
-    # Admin-only. Fails closed when ADMIN_IDS is empty.
-    return is_admin_id(uid)
+    if not ADMIN_IDS:
+        return False
+    return bool(uid) and (uid in ADMIN_IDS or uid in approved_users)
 
 
 async def deny(update: Update):
-    await update.message.reply_text("🔒 This bot is private. Access denied.")
+    await update.message.reply_text(
+        "🔒 This bot is private. Send /start to request access."
+    )
 
 
 def esc(s) -> str:
@@ -235,13 +258,19 @@ def locked_welcome_text() -> str:
         f'{ce("🛍️")} <b>LC WAIKIKI · RU</b> {ce("🛍️")}\n'
         f"{SEP}\n\n"
         f'{ce("🔒")} <i>This bot is private.</i>\n\n'
-        f"You are not authorised to use it."
+        f"Send a request below and an admin will review it."
     )
+
+
+def request_access_rows() -> list[list[dict]]:
+    return [[with_icon({"text": "Request Access", "callback_data": "req:access"}, "🔓")]]
 
 
 def panel_text() -> str:
     running = bool(state.runner and state.runner.is_running)
     dot = ce("🟢") if running else ce("🟡")
+    auto_dot = ce("🟢") if state.auto_run_enabled else ce("🔴")
+    auto_label = f"ON · every {AUTO_RUN_INTERVAL_MIN} min" if state.auto_run_enabled else "OFF"
     return (
         f'{ce("🛍️")} <b>LC WAIKIKI · CONTROL PANEL</b>\n'
         f"{SEP}\n\n"
@@ -249,12 +278,14 @@ def panel_text() -> str:
         f'├ {ce("📱")} Numbers  →  <b>{len(state.numbers)}</b>\n'
         f'╰ {ce("🌐")} Proxies  →  <b>{len(state.proxies)}</b>\n\n'
         f'╭─ {ce("⚙️")} <b>STATE</b>\n'
-        f"╰ {dot} <b>{'RUNNING' if running else 'IDLE'}</b>\n\n"
+        f'├ {dot} <b>{"RUNNING" if running else "IDLE"}</b>\n'
+        f'╰ {auto_dot} <b>AUTO {auto_label}</b>\n\n'
         f'{ce("👇")} <i>Tap a button or use the commands.</i>'
     )
 
 
 def control_rows(uid) -> list[list[dict]]:
+    auto_lbl = "Auto: ON ✅" if state.auto_run_enabled else "Auto: OFF"
     rows = [
         [
             with_icon({"text": "Run", "callback_data": "panel:run"}, "▶️"),
@@ -270,7 +301,10 @@ def control_rows(uid) -> list[list[dict]]:
             with_icon({"text": "Add Numbers", "callback_data": "panel:addnum"}, "📱"),
             with_icon({"text": "Add Proxy", "callback_data": "panel:addproxy"}, "🌐"),
         ],
+        [with_icon({"text": auto_lbl, "callback_data": "panel:auto"}, "🤖")],
     ]
+    if is_admin_id(uid):
+        rows.append([with_icon({"text": "Members", "callback_data": "panel:users"}, "👥")])
     rows.append([with_icon({"text": "Refresh", "callback_data": "panel:refresh"}, "🔄")])
     return rows
 
@@ -363,6 +397,39 @@ def history_text_styled() -> str:
         f"{recent_str}"
         f"{more}"
     )
+
+
+# ─────────────────────────────────────────────────────────────────
+#  Members view builder
+# ─────────────────────────────────────────────────────────────────
+def members_text() -> str:
+    lines = [f'{ce("👥")} <b>MEMBERS</b>\n{SEP}\n']
+    if not pending_users:
+        lines.append(f'{ce("⏳")} No pending requests.')
+    else:
+        lines.append(f'{ce("⏳")} <b>PENDING ({len(pending_users)})</b>')
+        for u_id, info in pending_users.items():
+            name = esc(info.get("name", "Unknown"))
+            uname_part = f' · @{esc(info.get("username",""))}' if info.get("username") else ""
+            lines.append(f'  {ce("👤")} <b>{name}</b>{uname_part}  <code>{u_id}</code>')
+    non_admin_approved = [u for u in approved_users if u not in ADMIN_IDS]
+    if non_admin_approved:
+        lines.append(f'\n{ce("✅")} <b>APPROVED ({len(non_admin_approved)})</b>')
+        for u_id in non_admin_approved:
+            lines.append(f'  <code>{u_id}</code>')
+    return "\n".join(lines)
+
+
+def members_rows() -> list[list[dict]]:
+    rows = []
+    for u_id, info in pending_users.items():
+        name = (info.get("name") or str(u_id))[:20]
+        rows.append([
+            with_icon({"text": f"✅ {name}", "callback_data": f"approve:{u_id}"}, "✅"),
+            with_icon({"text": "❌ Decline", "callback_data": f"decline:{u_id}"}, "❌"),
+        ])
+    rows.append([with_icon({"text": "↩ Back", "callback_data": "panel:refresh"}, "🔙")])
+    return rows
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -678,6 +745,7 @@ async def start_run(context, chat_id, skip_succeeded=False) -> str:
         numbers=state.numbers,
         proxies=state.proxies,
         numbers_per_session=NUMBERS_PER_SESSION,
+        concurrent_sessions=CONCURRENT_SESSIONS,
         loop_forever=LOOP_FOREVER,
         skip_succeeded=skip_succeeded,
         succeeded=succeeded,
@@ -757,7 +825,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if has_access(uid):
         await premium.raw_send(BOT_TOKEN, chat_id, panel_text(), control_rows(uid))
     else:
-        await premium.raw_send(BOT_TOKEN, chat_id, locked_welcome_text())
+        await premium.raw_send(BOT_TOKEN, chat_id, locked_welcome_text(), request_access_rows())
 
 
 async def cmd_addnumbers(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -839,7 +907,29 @@ async def cmd_addproxy(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cmd_clear(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not has_access(_uid(update)):
         return await deny(update)
-    await update.message.reply_text(do_clear())
+    if state.runner and state.runner.is_running:
+        return await update.message.reply_text("⚠️ A run is in progress — use Stop first.")
+    chat_id = update.effective_chat.id
+    clear_rows = [
+        [
+            with_icon({"text": "Numbers", "callback_data": "clear:numbers"}, "📱"),
+            with_icon({"text": "Proxies", "callback_data": "clear:proxies"}, "🌐"),
+        ],
+        [
+            with_icon({"text": "Results", "callback_data": "clear:results"}, "🗂"),
+            with_icon({"text": "All", "callback_data": "clear:all"}, "🧹"),
+        ],
+        [with_icon({"text": "Cancel", "callback_data": "clear:cancel"}, "❌")],
+    ]
+    await premium.raw_send(
+        BOT_TOKEN, chat_id,
+        f'{ce("🗑️")} <b>CLEAR — choose what to delete:</b>\n{SEP}\n'
+        f'├ {ce("📱")} Numbers   ({len(state.numbers)} loaded)\n'
+        f'├ {ce("🌐")} Proxies   ({len(state.proxies)} loaded)\n'
+        f'├ {ce("🗂")} Results   ({len(state.results)} recorded)\n'
+        f'╰ {ce("🧹")} All of the above',
+        clear_rows,
+    )
 
 
 async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -871,6 +961,77 @@ async def cmd_history(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await premium.raw_send(BOT_TOKEN, update.effective_chat.id, history_text_styled())
 
 
+async def cmd_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin_id(_uid(update)):
+        return await deny(update)
+    await premium.raw_send(
+        BOT_TOKEN, update.effective_chat.id, members_text(), members_rows()
+    )
+
+
+async def cmd_auto(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin_id(_uid(update)):
+        return await deny(update)
+    chat_id = update.effective_chat.id
+    if state.auto_run_enabled:
+        state.auto_run_enabled = False
+        state.auto_chat_id = None
+        for job in context.job_queue.get_jobs_by_name("auto_run"):
+            job.schedule_removal()
+        await update.message.reply_text(f'{ce("🤖")} Auto-run <b>OFF</b>.', parse_mode="HTML")
+    else:
+        state.auto_run_enabled = True
+        state.auto_chat_id = chat_id
+        context.job_queue.run_repeating(
+            auto_run_job,
+            interval=AUTO_RUN_INTERVAL_MIN * 60,
+            first=AUTO_RUN_INTERVAL_MIN * 60,
+            name="auto_run",
+            chat_id=chat_id,
+        )
+        await update.message.reply_text(
+            f'{ce("🤖")} Auto-run <b>ON</b> · every {AUTO_RUN_INTERVAL_MIN} min. '
+            f'Use /auto again to stop.',
+            parse_mode="HTML",
+        )
+
+
+async def auto_run_job(context: ContextTypes.DEFAULT_TYPE):
+    """Periodic job: fire a run if the bot is idle and numbers are loaded."""
+    chat_id = state.auto_chat_id
+    if not chat_id:
+        return
+    if not state.numbers:
+        logger.info("Auto-run skipped: no numbers loaded.")
+        return
+    if state.run_task and not state.run_task.done():
+        logger.info("Auto-run skipped: already running.")
+        return
+    logger.info("Auto-run triggered (interval %d min).", AUTO_RUN_INTERVAL_MIN)
+    result = await start_run(context, chat_id)
+    if result:
+        await premium.raw_send(BOT_TOKEN, chat_id, result)
+
+
+async def notify_admins_access_request(bot, uid: int, name: str, username: str):
+    uname_part = f" (@{esc(username)})" if username else ""
+    text = (
+        f'{ce("🔔")} <b>ACCESS REQUEST</b>\n'
+        f'{ce("👤")} <b>{esc(name)}</b>{uname_part}\n'
+        f'<code>{uid}</code>\n\n'
+        f'Tap to approve or decline:'
+    )
+    rows = [[
+        with_icon({"text": "✅ Approve", "callback_data": f"approve:{uid}"}, "✅"),
+        with_icon({"text": "❌ Decline", "callback_data": f"decline:{uid}"}, "❌"),
+    ]]
+    for admin_id in ADMIN_IDS:
+        try:
+            await premium.raw_send(BOT_TOKEN, admin_id, text, rows)
+        except Exception as e:
+            logger.warning("Could not notify admin %s: %s", admin_id, e)
+
+
 async def on_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Bare file upload (no command): route by caption."""
     if not has_access(_uid(update)):
@@ -895,6 +1056,96 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = query.message
     chat_id = msg.chat.id if msg else uid
     msg_id = msg.message_id if msg else None
+
+    # ── Access request ──
+    if data == "req:access":
+        if has_access(uid):
+            return await query.answer("You already have access.", show_alert=True)
+        await query.answer("✅ Request sent! An admin will review it.", show_alert=True)
+        user = query.from_user
+        name = user.full_name or str(uid)
+        username = user.username or ""
+        pending_users[uid] = {"name": name, "username": username}
+        await notify_admins_access_request(context.bot, uid, name, username)
+        return
+
+    # ── Approve / decline ──
+    if data.startswith("approve:") or data.startswith("decline:"):
+        if not is_admin_id(uid):
+            return await query.answer("Admins only.", show_alert=True)
+        action_str, target_str = data.split(":", 1)
+        try:
+            target_id = int(target_str)
+        except ValueError:
+            return await query.answer("Invalid ID.", show_alert=True)
+        if action_str == "approve":
+            approved_users.add(target_id)
+            pending_users.pop(target_id, None)
+            await query.answer(f"✅ User {target_id} approved.")
+            try:
+                await premium.raw_send(
+                    BOT_TOKEN, target_id,
+                    f'{ce("✅")} <b>Access granted!</b> Send /start to open the panel.',
+                )
+            except Exception:
+                pass
+        else:
+            pending_users.pop(target_id, None)
+            approved_users.discard(target_id)
+            await query.answer(f"❌ User {target_id} declined.")
+            try:
+                await premium.raw_send(
+                    BOT_TOKEN, target_id,
+                    f'{ce("❌")} <b>Request declined.</b> Contact the admin if you think this is a mistake.',
+                )
+            except Exception:
+                pass
+        if msg_id is not None:
+            try:
+                await premium.raw_edit(BOT_TOKEN, chat_id, msg_id, members_text(), members_rows())
+            except Exception:
+                pass
+        return
+
+    # ── Clear submenu ──
+    if data.startswith("clear:"):
+        if not has_access(uid):
+            return await query.answer("Access denied.", show_alert=True)
+        clear_action = data.split(":", 1)[1]
+        if clear_action == "cancel":
+            await query.answer("Cancelled.")
+            if msg_id is not None:
+                try:
+                    await premium.raw_edit(BOT_TOKEN, chat_id, msg_id, "❌ Clear cancelled.")
+                except Exception:
+                    pass
+            return
+        if state.runner and state.runner.is_running:
+            return await query.answer("⚠️ Stop the run first.", show_alert=True)
+        if clear_action == "numbers":
+            state.clear_numbers()
+            await query.answer("📱 Numbers cleared.")
+            label = f'{ce("✅")} Numbers cleared.'
+        elif clear_action == "proxies":
+            state.clear_proxies()
+            await query.answer("🌐 Proxies cleared.")
+            label = f'{ce("✅")} Proxies cleared.'
+        elif clear_action == "results":
+            state.clear_results()
+            await query.answer("🗂 Results cleared.")
+            label = f'{ce("✅")} Results history cleared.'
+        elif clear_action == "all":
+            state.reset_collection()
+            await query.answer("🧹 All cleared.")
+            label = f'{ce("✅")} All cleared — numbers, proxies and results.'
+        else:
+            return await query.answer()
+        if msg_id is not None:
+            try:
+                await premium.raw_edit(BOT_TOKEN, chat_id, msg_id, label)
+            except Exception:
+                pass
+        return
 
     # ── Control panel ──
     if data.startswith("panel:"):
@@ -926,8 +1177,61 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 BOT_TOKEN, chat_id, status_text_styled(), control_rows(uid)
             )
         elif action == "clear":
+            if state.runner and state.runner.is_running:
+                return await query.answer("⚠️ Stop the run first.", show_alert=True)
             await query.answer()
-            await premium.raw_send(BOT_TOKEN, chat_id, do_clear())
+            clear_rows = [
+                [
+                    with_icon({"text": "Numbers", "callback_data": "clear:numbers"}, "📱"),
+                    with_icon({"text": "Proxies", "callback_data": "clear:proxies"}, "🌐"),
+                ],
+                [
+                    with_icon({"text": "Results", "callback_data": "clear:results"}, "🗂"),
+                    with_icon({"text": "All", "callback_data": "clear:all"}, "🧹"),
+                ],
+                [with_icon({"text": "Cancel", "callback_data": "clear:cancel"}, "❌")],
+            ]
+            await premium.raw_send(
+                BOT_TOKEN, chat_id,
+                f'{ce("🗑️")} <b>CLEAR — choose what to delete:</b>\n{SEP}\n'
+                f'├ {ce("📱")} Numbers   ({len(state.numbers)} loaded)\n'
+                f'├ {ce("🌐")} Proxies   ({len(state.proxies)} loaded)\n'
+                f'├ {ce("🗂")} Results   ({len(state.results)} recorded)\n'
+                f'╰ {ce("🧹")} All of the above',
+                clear_rows,
+            )
+        elif action == "users":
+            if not is_admin_id(uid):
+                return await query.answer("Admins only.", show_alert=True)
+            await query.answer()
+            await premium.raw_send(BOT_TOKEN, chat_id, members_text(), members_rows())
+        elif action == "auto":
+            if not is_admin_id(uid):
+                return await query.answer("Admins only.", show_alert=True)
+            await query.answer()
+            if state.auto_run_enabled:
+                state.auto_run_enabled = False
+                state.auto_chat_id = None
+                for job in context.job_queue.get_jobs_by_name("auto_run"):
+                    job.schedule_removal()
+                msg_auto = f'{ce("🤖")} Auto-run <b>disabled</b>.'
+            else:
+                state.auto_run_enabled = True
+                state.auto_chat_id = chat_id
+                context.job_queue.run_repeating(
+                    auto_run_job,
+                    interval=AUTO_RUN_INTERVAL_MIN * 60,
+                    first=AUTO_RUN_INTERVAL_MIN * 60,
+                    name="auto_run",
+                    chat_id=chat_id,
+                )
+                msg_auto = f'{ce("🤖")} Auto-run <b>enabled</b> · every {AUTO_RUN_INTERVAL_MIN} min.'
+            await premium.raw_send(BOT_TOKEN, chat_id, msg_auto)
+            if msg_id is not None:
+                try:
+                    await premium.raw_edit(BOT_TOKEN, chat_id, msg_id, panel_text(), control_rows(uid))
+                except Exception:
+                    pass
         elif action == "addnum":
             await query.answer(
                 "Send /addnumbers then the list (one per line) or attach a .txt.",
@@ -961,7 +1265,9 @@ BOT_COMMANDS = [
     BotCommand("status", "Live run statistics"),
     BotCommand("addnumbers", "Add phone numbers"),
     BotCommand("addproxy", "Add proxies"),
-    BotCommand("clear", "Clear numbers & proxies"),
+    BotCommand("clear", "Clear data (submenu)"),
+    BotCommand("users", "Manage member access (admin)"),
+    BotCommand("auto", "Toggle 30-min auto-run (admin)"),
     BotCommand("help", "Show help / panel"),
 ]
 
@@ -985,6 +1291,7 @@ def main():
         logger.warning("ADMIN_IDS is empty — the bot will reject everyone until it is set.")
 
     state.load()
+    approved_users.update(ADMIN_IDS)
 
     app = Application.builder().token(BOT_TOKEN).post_init(_post_init).build()
 
@@ -998,6 +1305,8 @@ def main():
     app.add_handler(CommandHandler("history", cmd_history))
     app.add_handler(CommandHandler("results", cmd_history))
     app.add_handler(CommandHandler("clear", cmd_clear))
+    app.add_handler(CommandHandler("users", cmd_users))
+    app.add_handler(CommandHandler("auto", cmd_auto))
     app.add_handler(CallbackQueryHandler(on_callback))
     app.add_handler(MessageHandler(filters.Document.ALL, on_document))
 
