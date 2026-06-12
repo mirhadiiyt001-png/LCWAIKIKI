@@ -1001,10 +1001,11 @@ async def cmd_auto(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         state.auto_run_enabled = True
         state.auto_chat_id = chat_id
+        # Schedule repeating job for subsequent runs (first run is triggered directly below)
         context.job_queue.run_repeating(
             auto_run_job,
             interval=AUTO_RUN_INTERVAL_MIN * 60,
-            first=0,
+            first=AUTO_RUN_INTERVAL_MIN * 60,
             name="auto_run",
             chat_id=chat_id,
         )
@@ -1013,6 +1014,11 @@ async def cmd_auto(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f'Use /auto again to stop.',
             parse_mode="HTML",
         )
+        # Directly trigger first run immediately (don't depend on scheduler)
+        if state.numbers and (not state.run_task or state.run_task.done()):
+            result = await start_run(context, chat_id, skip_succeeded=True)
+            if result:
+                await premium.raw_send(BOT_TOKEN, chat_id, result)
 
 
 async def auto_run_job(context: ContextTypes.DEFAULT_TYPE):
@@ -1261,10 +1267,11 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             else:
                 state.auto_run_enabled = True
                 state.auto_chat_id = chat_id
+                # Schedule repeating job for subsequent runs (first run is triggered directly below)
                 context.job_queue.run_repeating(
                     auto_run_job,
                     interval=AUTO_RUN_INTERVAL_MIN * 60,
-                    first=0,
+                    first=AUTO_RUN_INTERVAL_MIN * 60,
                     name="auto_run",
                     chat_id=chat_id,
                 )
@@ -1275,6 +1282,11 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     await premium.raw_edit(BOT_TOKEN, chat_id, msg_id, panel_text(), control_rows(uid))
                 except Exception:
                     pass
+            # If auto was just enabled, directly trigger first run immediately
+            if state.auto_run_enabled and state.numbers and (not state.run_task or state.run_task.done()):
+                result = await start_run(context, chat_id, skip_succeeded=True)
+                if result:
+                    await premium.raw_send(BOT_TOKEN, chat_id, result)
         elif action == "addnum":
             await query.answer(
                 "Send /addnumbers then the list (one per line) or attach a .txt.",
