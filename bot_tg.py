@@ -1016,7 +1016,7 @@ async def cmd_auto(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         # Directly trigger first run immediately (don't depend on scheduler)
         if state.numbers and (not state.run_task or state.run_task.done()):
-            result = await start_run(context, chat_id, skip_succeeded=True)
+            result = await start_run(context, chat_id, skip_succeeded=False)
             if result:
                 await premium.raw_send(BOT_TOKEN, chat_id, result)
 
@@ -1033,18 +1033,12 @@ async def auto_run_job(context: ContextTypes.DEFAULT_TYPE):
         logger.info("Auto-run skipped: already running.")
         return
 
-    # Check if all numbers already succeeded — skip silently
-    succeeded = state.succeeded_numbers()
-    if succeeded and succeeded.issuperset(state.numbers):
-        logger.info("Auto-run skipped: all %d numbers already succeeded.", len(state.numbers))
-        return
-
-    remaining = len(state.numbers) - len(succeeded & set(state.numbers))
+    remaining = len(state.numbers)
     logger.info("Auto-run triggered (interval %d min). %d numbers remaining.", AUTO_RUN_INTERVAL_MIN, remaining)
     await premium.raw_send(
         BOT_TOKEN, chat_id,
         f'{ce("🤖")} <b>AUTO-RUN TRIGGERED</b>\n'
-        f'{ce("📱")} {remaining} numbers to process (skipping {len(succeeded & set(state.numbers))} succeeded)',
+        f'{ce("📱")} {remaining} numbers to process',
     )
 
     async def _auto_complete(runner):
@@ -1057,7 +1051,7 @@ async def auto_run_job(context: ContextTypes.DEFAULT_TYPE):
             s["successful"], s["failed"], runner.runtime_str(),
         )
 
-    result = await start_run(context, chat_id, skip_succeeded=True, on_complete=_auto_complete)
+    result = await start_run(context, chat_id, skip_succeeded=False, on_complete=_auto_complete)
     if result:
         await premium.raw_send(BOT_TOKEN, chat_id, result)
 
@@ -1284,7 +1278,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     pass
             # If auto was just enabled, directly trigger first run immediately
             if state.auto_run_enabled and state.numbers and (not state.run_task or state.run_task.done()):
-                result = await start_run(context, chat_id, skip_succeeded=True)
+                result = await start_run(context, chat_id, skip_succeeded=False)
                 if result:
                     await premium.raw_send(BOT_TOKEN, chat_id, result)
         elif action == "addnum":

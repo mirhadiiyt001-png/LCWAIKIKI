@@ -1022,7 +1022,7 @@ async def process_session(numbers_batch, pw_instance, session_id, proxy_str,
             await on_result(phone_number, result)
 
             if result["status"] == "error_stop":
-                return True
+                return False
 
         await page.wait_for_timeout(1000)
         return False

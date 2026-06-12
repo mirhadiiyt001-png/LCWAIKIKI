@@ -246,7 +246,12 @@ class RegistrationRunner:
         proxy_failed_numbers = []
         MAX_PROXY_RETRY_ROUNDS = 3  # max times to retry proxy-failed numbers
 
+        stop_run = False
+        consecutive_site_errors = 0
+
         async def on_result(phone, result):
+            nonlocal stop_run, consecutive_site_errors
+            
             self.stats["total_submissions"] += 1
             self.stats["processed"] += 1
             self.stats["last_number"] = phone
@@ -254,15 +259,20 @@ class RegistrationRunner:
             if status == "success":
                 self.stats["successful"] += 1
                 self.succeeded.add(phone)
+                consecutive_site_errors = 0
                 emit(f'{ce("✅")} <b>+7{phone}</b> <i>· OTP sent</i>')
             elif status == "error_stop":
                 self.stats["failed"] += 1
+                consecutive_site_errors += 1
                 detail = result.get("detail", "Site error")
                 self.stats["last_error"] = detail
                 emit(
-                    f'{ce("⛔️")} <b>+7{phone}</b> <i>· site error</i>'
+                    f'{ce("⛔️")} <b>+7{phone}</b> <i>· site error ({consecutive_site_errors}/3)</i>'
                     + (f'\n{ce("⚠️")} <i>{_esc(detail)}</i>' if detail else "")
                 )
+                if consecutive_site_errors >= 3:
+                    stop_run = True
+                    self._stop_event.set()
             elif status == "proxy_fail":
                 # Don't count as permanent failure — will be retried
                 proxy_failed_numbers.append(phone)
@@ -299,7 +309,6 @@ class RegistrationRunner:
                 except Exception:
                     pass
 
-        stop_run = False
         try:
             async with async_playwright() as pw:
                 round_num = 0
