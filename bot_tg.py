@@ -728,7 +728,7 @@ def _final_card_text(r) -> str:
 # ─────────────────────────────────────────────────────────────────
 #  Operational helpers (shared by commands and panel buttons)
 # ─────────────────────────────────────────────────────────────────
-async def start_run(context, chat_id, skip_succeeded=False) -> str:
+async def start_run(context, chat_id, skip_succeeded=False, on_complete=None) -> str:
     # Atomic guard: a started run leaves a live run_task. There is no await
     # between this check and assigning state.run_task below, so two starts
     # cannot both pass.
@@ -776,6 +776,25 @@ async def start_run(context, chat_id, skip_succeeded=False) -> str:
             except Exception:
                 anim.cancel()
             await streamer.stop()
+            # Send completion notification
+            try:
+                s = runner.stats
+                notif = (
+                    f'{ce("🏁")} <b>RUN COMPLETE</b>\n{SEP}\n\n'
+                    f'{ce("✅")} Success  →  <b>{s["successful"]}</b>\n'
+                    f'{ce("❌")} Failed   →  <b>{s["failed"]}</b>\n'
+                    f'{ce("📨")} Total    →  <b>{s["total_submissions"]}</b>\n'
+                    f'{ce("⏱️")} Runtime  →  <b>{runner.runtime_str()}</b>'
+                )
+                await premium.raw_send(BOT_TOKEN, chat_id, notif)
+            except Exception:
+                pass
+            # Fire on_complete callback (used by auto-run)
+            if on_complete:
+                try:
+                    await on_complete(runner)
+                except Exception:
+                    pass
 
     state.run_task = asyncio.create_task(_runner_wrapper())
     return ""
@@ -985,12 +1004,12 @@ async def cmd_auto(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.job_queue.run_repeating(
             auto_run_job,
             interval=AUTO_RUN_INTERVAL_MIN * 60,
-            first=AUTO_RUN_INTERVAL_MIN * 60,
+            first=0,
             name="auto_run",
             chat_id=chat_id,
         )
         await update.message.reply_text(
-            f'{ce("🤖")} Auto-run <b>ON</b> · every {AUTO_RUN_INTERVAL_MIN} min. '
+            f'{ce("🤖")} Auto-run <b>ON</b> · starting now, then every {AUTO_RUN_INTERVAL_MIN} min. '
             f'Use /auto again to stop.',
             parse_mode="HTML",
         )
@@ -1007,8 +1026,32 @@ async def auto_run_job(context: ContextTypes.DEFAULT_TYPE):
     if state.run_task and not state.run_task.done():
         logger.info("Auto-run skipped: already running.")
         return
-    logger.info("Auto-run triggered (interval %d min).", AUTO_RUN_INTERVAL_MIN)
-    result = await start_run(context, chat_id)
+
+    # Check if all numbers already succeeded — skip silently
+    succeeded = state.succeeded_numbers()
+    if succeeded and succeeded.issuperset(state.numbers):
+        logger.info("Auto-run skipped: all %d numbers already succeeded.", len(state.numbers))
+        return
+
+    remaining = len(state.numbers) - len(succeeded & set(state.numbers))
+    logger.info("Auto-run triggered (interval %d min). %d numbers remaining.", AUTO_RUN_INTERVAL_MIN, remaining)
+    await premium.raw_send(
+        BOT_TOKEN, chat_id,
+        f'{ce("🤖")} <b>AUTO-RUN TRIGGERED</b>\n'
+        f'{ce("📱")} {remaining} numbers to process (skipping {len(succeeded & set(state.numbers))} succeeded)',
+    )
+
+    async def _auto_complete(runner):
+        """Called when an auto-run finishes."""
+        s = runner.stats
+        if s["successful"] == 0 and s["failed"] == 0:
+            return
+        logger.info(
+            "Auto-run finished: %d success, %d failed, runtime %s",
+            s["successful"], s["failed"], runner.runtime_str(),
+        )
+
+    result = await start_run(context, chat_id, skip_succeeded=True, on_complete=_auto_complete)
     if result:
         await premium.raw_send(BOT_TOKEN, chat_id, result)
 
@@ -1221,11 +1264,11 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 context.job_queue.run_repeating(
                     auto_run_job,
                     interval=AUTO_RUN_INTERVAL_MIN * 60,
-                    first=AUTO_RUN_INTERVAL_MIN * 60,
+                    first=0,
                     name="auto_run",
                     chat_id=chat_id,
                 )
-                msg_auto = f'{ce("🤖")} Auto-run <b>enabled</b> · every {AUTO_RUN_INTERVAL_MIN} min.'
+                msg_auto = f'{ce("🤖")} Auto-run <b>enabled</b> · starting now, then every {AUTO_RUN_INTERVAL_MIN} min.'
             await premium.raw_send(BOT_TOKEN, chat_id, msg_auto)
             if msg_id is not None:
                 try:

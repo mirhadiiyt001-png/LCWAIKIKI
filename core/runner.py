@@ -361,7 +361,7 @@ class RegistrationRunner:
 
                         is_last = (chunk_start + c >= len(groups))
                         if not is_last and not self._stop_event.is_set():
-                            await asyncio.sleep(1.0)
+                            await asyncio.sleep(0.5)
 
                     if stop_run or self._stop_event.is_set() or not self.loop_forever:
                         break
@@ -371,7 +371,7 @@ class RegistrationRunner:
                         f'{ce("✅")} {self.stats["successful"]}   '
                         f'{ce("❌")} {self.stats["failed"]}'
                     )
-                    await asyncio.sleep(1.5)
+                    await asyncio.sleep(0.5)
 
         except Exception as e:
             self.stats["last_error"] = str(e)[:120]
