@@ -428,7 +428,7 @@ def members_rows() -> list[list[dict]]:
             with_icon({"text": f"✅ {name}", "callback_data": f"approve:{u_id}"}, "✅"),
             with_icon({"text": "❌ Decline", "callback_data": f"decline:{u_id}"}, "❌"),
         ])
-    rows.append([with_icon({"text": "↩ Back", "callback_data": "panel:refresh"}, "🔙")])
+    rows.append([with_icon({"text": "Back", "callback_data": "panel:refresh"}, "🔙")])
     return rows
 
 
@@ -936,7 +936,7 @@ async def cmd_clear(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ],
         [
             with_icon({"text": "Results", "callback_data": "clear:results"}, "🗂"),
-            with_icon({"text": "All", "callback_data": "clear:all"}, "🧹"),
+            with_icon({"text": "🧹 All", "callback_data": "clear:all"}, "🧹"),
         ],
         [with_icon({"text": "Cancel", "callback_data": "clear:cancel"}, "❌")],
     ]
@@ -1236,7 +1236,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 ],
                 [
                     with_icon({"text": "Results", "callback_data": "clear:results"}, "🗂"),
-                    with_icon({"text": "All", "callback_data": "clear:all"}, "🧹"),
+                    with_icon({"text": "🧹 All", "callback_data": "clear:all"}, "🧹"),
                 ],
                 [with_icon({"text": "Cancel", "callback_data": "clear:cancel"}, "❌")],
             ]
