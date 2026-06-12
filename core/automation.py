@@ -518,14 +518,18 @@ def parse_proxy(proxy_str, force_protocol=None):
 
 
 def get_proxy_variants(proxy_str):
-  """
-  Returns a list of proxy dicts to try with different protocols.
-  Tries: http, socks5
-  """
-  variants = []
-  for proto in ["http", "socks5"]:
-      variants.append(parse_proxy(proxy_str, force_protocol=proto))
-  return variants
+    """
+    Returns a list of proxy dicts to try. Defaults to HTTP unless SOCKS5 is specified.
+    """
+    variants = []
+    if proxy_str.lower().startswith("socks5://"):
+        variants.append(parse_proxy(proxy_str, force_protocol="socks5"))
+    elif proxy_str.lower().startswith("http://") or proxy_str.lower().startswith("https://"):
+        variants.append(parse_proxy(proxy_str, force_protocol="http"))
+    else:
+        # Default to HTTP. SOCKS5 with auth is not supported by Chromium anyway.
+        variants.append(parse_proxy(proxy_str, force_protocol="http"))
+    return variants
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -925,7 +929,7 @@ async def process_session(numbers_batch, pw_instance, session_id, proxy_str,
                         await _setup_blocking(context)
 
                         log("🌐", f"[S{session_id}] Opening {TARGET_URL} via {proto_name}...")
-                        await page.goto(TARGET_URL, wait_until="domcontentloaded", timeout=45000)
+                        await page.goto(TARGET_URL, wait_until="domcontentloaded", timeout=60000)
                         await page.wait_for_timeout(PAGE_LOAD_WAIT * 1000)
 
                         connected = True
