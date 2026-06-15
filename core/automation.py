@@ -571,16 +571,16 @@ async def dismiss_popup(page, session_id, log=_noop_log):
         "button:has-text('✖')",
     ]
 
-    for sel in close_selectors:
-        try:
-            btn = page.locator(sel).first
-            if await btn.is_visible(timeout=1000):
-                await btn.click()
-                log("✕", f"[S{session_id}] Popup closed via: {sel}")
-                await page.wait_for_timeout(500)
-                return True
-        except Exception:
-            continue
+    combined_sel = ", ".join(close_selectors)
+    try:
+        btn = page.locator(combined_sel).first
+        if await btn.is_visible(timeout=1500):
+            await btn.click()
+            log("✕", f"[S{session_id}] Popup closed via locator")
+            await page.wait_for_timeout(500)
+            return True
+    except Exception:
+        pass
 
     try:
         closed = await page.evaluate("""
@@ -712,11 +712,9 @@ async def fill_and_submit_number(page, phone_number, session_id, is_first_number
             phone_loc = page.locator("input.phone-field__number-input").first
             await phone_loc.wait_for(state="visible", timeout=FORM_TIMEOUT)
             await phone_loc.click()
-            await human_delay(200, 400)
-            await phone_loc.press("Control+a")
             await human_delay(100, 200)
-            await phone_loc.press("Backspace")
-            await human_delay(200, 400)
+            await phone_loc.fill("")
+            await human_delay(100, 200)
             await human_type(phone_loc, phone_number)
 
             new_email = generate_random_email()
@@ -724,13 +722,11 @@ async def fill_and_submit_number(page, phone_number, session_id, is_first_number
             log("📧", f"[S{session_id}] New email: {new_email}")
             email_loc = page.locator("#form-input-email").first
             try:
-                await human_delay(300, 600)
+                await human_delay(100, 300)
                 await email_loc.click()
-                await human_delay(200, 300)
-                await email_loc.press("Control+a")
                 await human_delay(100, 200)
-                await email_loc.press("Backspace")
-                await human_delay(200, 400)
+                await email_loc.fill("")
+                await human_delay(100, 200)
                 await human_type(email_loc, new_email)
             except Exception:
                 try:
@@ -970,22 +966,21 @@ async def process_session(numbers_batch, pw_instance, session_id, proxy_str,
         if not connected or not page:
             return False
 
-        for sel in [
+        cookie_selectors = [
             "button:has-text('Anladım')",
             "button:has-text('Принять')",
             "button:has-text('Согласен')",
             "#onetrust-accept-btn-handler",
             "button:has-text('Accept')",
-        ]:
-            try:
-                btn = page.locator(sel).first
-                if await btn.is_visible(timeout=1500):
-                    await btn.click()
-                    log("🍪", f"[S{session_id}] Cookies accepted")
-                    await page.wait_for_timeout(500)
-                    break
-            except Exception:
-                pass
+        ]
+        try:
+            btn = page.locator(", ".join(cookie_selectors)).first
+            if await btn.is_visible(timeout=2000):
+                await btn.click()
+                log("🍪", f"[S{session_id}] Cookies accepted")
+                await page.wait_for_timeout(500)
+        except Exception:
+            pass
 
         for i, phone_number in enumerate(numbers_batch):
             if _stop():
@@ -1007,26 +1002,25 @@ async def process_session(numbers_batch, pw_instance, session_id, proxy_str,
                 try:
                     await page.goto(TARGET_URL, wait_until="domcontentloaded", timeout=60000)
                     await page.wait_for_timeout(PAGE_LOAD_WAIT * 1000)
-                    for sel in [
+                    cookie_sel = ", ".join([
                         "button:has-text('Anladım')",
                         "button:has-text('Принять')",
                         "#onetrust-accept-btn-handler",
-                    ]:
-                        try:
-                            btn = page.locator(sel).first
-                            if await btn.is_visible(timeout=1000):
-                                await btn.click()
-                                break
-                        except Exception:
-                            pass
+                    ])
+                    try:
+                        btn = page.locator(cookie_sel).first
+                        if await btn.is_visible(timeout=1500):
+                            await btn.click()
+                    except Exception:
+                        pass
                     result = await fill_and_submit_number(page, phone_number, session_id, True, log)
                 except Exception as retry_err:
                     log("❌", f"[S{session_id}] Retry also failed: {str(retry_err)[:50]}")
 
             await on_result(phone_number, result)
 
-            if result["status"] == "error_stop":
-                return False
+            # Continue processing the batch even if there was an error_stop,
+            # letting the retry logic handle the next number with a page reload.
 
         await page.wait_for_timeout(1000)
         return False
