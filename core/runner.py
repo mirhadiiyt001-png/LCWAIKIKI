@@ -246,11 +246,10 @@ class RegistrationRunner:
         proxy_failed_numbers = []
         MAX_PROXY_RETRY_ROUNDS = 3  # max times to retry proxy-failed numbers
 
-        stop_run = False
         consecutive_site_errors = 0
 
         async def on_result(phone, result):
-            nonlocal stop_run, consecutive_site_errors
+            nonlocal consecutive_site_errors
             
             self.stats["total_submissions"] += 1
             self.stats["processed"] += 1
@@ -271,7 +270,6 @@ class RegistrationRunner:
                     + (f'\n{ce("⚠️")} <i>{_esc(detail)}</i>' if detail else "")
                 )
                 if consecutive_site_errors >= 3:
-                    stop_run = True
                     self._stop_event.set()
             elif status == "proxy_fail":
                 # Don't count as permanent failure — will be retried
@@ -365,15 +363,7 @@ class RegistrationRunner:
                             ))
 
                         label = f"{chunk_start+1}" if len(chunk) == 1 else f"{chunk_start+1}–{chunk_start+len(chunk)}"
-                        self.stats["status"] = f"SESSIONS {label} RUNNING"
-                        chunk_results = await asyncio.gather(*tasks, return_exceptions=True)
-
-                        for r in chunk_results:
-                            if r is True:
-                                stop_run = True
-                                break
-
-                        if stop_run:
+                        if self._stop_event.is_set():
                             self.stats["status"] = "STOPPED (site error)"
                             emit(f'{ce("⛔️")} <b>HARD SITE ERROR</b> <i>· stopping run</i>')
                             break
@@ -383,7 +373,7 @@ class RegistrationRunner:
                             await asyncio.sleep(0.5)
 
                     # ── Retry proxy-failed numbers ──
-                    if not stop_run and not self._stop_event.is_set() and proxy_failed_numbers:
+                    if not self._stop_event.is_set() and proxy_failed_numbers:
                         for retry_round in range(1, MAX_PROXY_RETRY_ROUNDS + 1):
                             if self._stop_event.is_set() or not proxy_failed_numbers:
                                 break
@@ -415,15 +405,7 @@ class RegistrationRunner:
                                         on_result=on_result, log=log,
                                         should_stop=self.should_stop,
                                     ))
-                                rchunk_results = await asyncio.gather(*rtasks, return_exceptions=True)
-                                for r in rchunk_results:
-                                    if r is True:
-                                        stop_run = True
-                                        break
-                                if stop_run:
-                                    break
-
-                            if stop_run:
+                            if self._stop_event.is_set():
                                 self.stats["status"] = "STOPPED (site error)"
                                 emit(f'{ce("⛔️")} <b>HARD SITE ERROR</b> <i>· stopping run</i>')
                                 break
@@ -442,7 +424,7 @@ class RegistrationRunner:
                                 f'<i>failed after {MAX_PROXY_RETRY_ROUNDS} proxy retries</i>'
                             )
 
-                    if stop_run or self._stop_event.is_set() or not self.loop_forever:
+                    if self._stop_event.is_set() or not self.loop_forever:
                         break
 
                     emit(
@@ -459,10 +441,10 @@ class RegistrationRunner:
                 f'{ce("⚠️")} <i>{_esc(str(e)[:120])}</i>'
             )
         finally:
-            automation.cleanup_all_temp_dirs()
-            self.is_running = False
-            if not stop_run:
-                self.stats["status"] = "STOPPED" if self._stop_event.is_set() else "DONE"
+            if not self._stop_event.is_set():
+                self.stats["status"] = "DONE"
+            else:
+                self.stats["status"] = "STOPPED"
             if on_step is None:
                 emit(
                     f'{ce("🏁")} <b>RUN FINISHED</b>\n'
