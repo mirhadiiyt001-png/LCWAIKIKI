@@ -363,6 +363,9 @@ class RegistrationRunner:
                             ))
 
                         label = f"{chunk_start+1}" if len(chunk) == 1 else f"{chunk_start+1}–{chunk_start+len(chunk)}"
+                        self.stats["status"] = f"SESSIONS {label} RUNNING"
+                        await asyncio.gather(*tasks, return_exceptions=True)
+
                         if self._stop_event.is_set():
                             self.stats["status"] = "STOPPED (site error)"
                             emit(f'{ce("⛔️")} <b>HARD SITE ERROR</b> <i>· stopping run</i>')
@@ -405,6 +408,9 @@ class RegistrationRunner:
                                         on_result=on_result, log=log,
                                         should_stop=self.should_stop,
                                     ))
+                                
+                                await asyncio.gather(*rtasks, return_exceptions=True)
+
                             if self._stop_event.is_set():
                                 self.stats["status"] = "STOPPED (site error)"
                                 emit(f'{ce("⛔️")} <b>HARD SITE ERROR</b> <i>· stopping run</i>')
